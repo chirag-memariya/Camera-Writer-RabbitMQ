@@ -1,0 +1,3 @@
+﻿<Project>
+  <Import Project="..\build\NVR1Service.props" />
+</Project>

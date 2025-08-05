@@ -1,0 +1,188 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using RabbitMQ.Client;
+using RabbitMQ.Client.Events;
+using System.Text;
+using System.Text.Json;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Add services
+builder.Services.AddSingleton<IRabbitMQConsumer, RabbitMQConsumer>();
+builder.Services.AddHostedService<NVR2Service>();
+builder.Services.AddLogging();
+
+var app = builder.Build();
+
+app.MapGet("/", () => "NVR2Service is running");
+
+app.Run();
+
+// Models
+public class CameraEvent
+{
+    public string CameraId { get; set; } = string.Empty;
+    public string EventType { get; set; } = string.Empty;
+    public DateTime Timestamp { get; set; }
+    public string Description { get; set; } = string.Empty;
+}
+
+// Interfaces
+public interface IRabbitMQConsumer
+{
+    Task StartConsumingAsync(Func<CameraEvent, Task> eventHandler, CancellationToken cancellationToken);
+}
+
+// RabbitMQ Consumer
+public class RabbitMQConsumer : IRabbitMQConsumer, IDisposable
+{
+    private readonly IConnection _connection;
+    private readonly IModel _channel;
+    private readonly ILogger<RabbitMQConsumer> _logger;
+    private const string ExchangeName = "camera_events";
+    private const string QueueName = "nvr2_queue";
+    private const string RoutingKey = "NVR-2";
+
+    public RabbitMQConsumer(ILogger<RabbitMQConsumer> logger)
+    {
+        _logger = logger;
+        
+        var factory = new ConnectionFactory()
+        {
+            HostName = "localhost",
+            UserName = "guest",
+            Password = "guest",
+            DispatchConsumersAsync = true
+        };
+
+        try
+        {
+            _connection = factory.CreateConnection();
+            _channel = _connection.CreateModel();
+            
+            _channel.ExchangeDeclare(exchange: ExchangeName, type: ExchangeType.Direct, durable: true);
+            _channel.QueueDeclare(queue: QueueName, durable: true, exclusive: false, autoDelete: false);
+            _channel.QueueBind(queue: QueueName, exchange: ExchangeName, routingKey: RoutingKey);
+            
+            var queueInfo = _channel.QueueDeclarePassive(QueueName);
+            _logger.LogInformation($"RabbitMQ Consumer initialized. Queue '{QueueName}' bound to exchange '{ExchangeName}' with routing key '{RoutingKey}'. Messages in queue: {queueInfo.MessageCount}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to initialize RabbitMQ Consumer");
+            throw;
+        }
+    }
+
+    public async Task StartConsumingAsync(Func<CameraEvent, Task> eventHandler, CancellationToken cancellationToken)
+    {
+        var consumer = new AsyncEventingBasicConsumer(_channel);
+        
+        consumer.Received += async (model, ea) =>
+        {
+            try
+            {
+                var body = ea.Body.ToArray();
+                var message = Encoding.UTF8.GetString(body);
+                
+                _logger.LogInformation($"Received message: {message}");
+                
+                var cameraEvent = JsonSerializer.Deserialize<CameraEvent>(message);
+                if (cameraEvent != null)
+                {
+                    await eventHandler(cameraEvent);
+                }
+                
+                _channel.BasicAck(deliveryTag: ea.DeliveryTag, multiple: false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing message");
+                _channel.BasicNack(deliveryTag: ea.DeliveryTag, multiple: false, requeue: true);
+            }
+        };
+
+        _channel.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
+        var consumerTag = _channel.BasicConsume(queue: QueueName, autoAck: false, consumer: consumer);
+        
+        _logger.LogInformation($"Started consuming messages with consumer tag: {consumerTag}");
+        
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(5000, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Consumer stopped due to cancellation");
+        }
+        finally
+        {
+            try
+            {
+                _channel.BasicCancel(consumerTag);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error cancelling consumer");
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        _channel?.Close();
+        _connection?.Close();
+    }
+}
+
+// NVR2 Service
+public class NVR2Service : BackgroundService
+{
+    private readonly IRabbitMQConsumer _consumer;
+    private readonly ILogger<NVR2Service> _logger;
+
+    public NVR2Service(IRabbitMQConsumer consumer, ILogger<NVR2Service> logger)
+    {
+        _consumer = consumer;
+        _logger = logger;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("NVR2Service started and waiting for camera events");
+        
+        await _consumer.StartConsumingAsync(ProcessCameraEvent, stoppingToken);
+    }
+
+    private async Task ProcessCameraEvent(CameraEvent cameraEvent)
+    {
+        _logger.LogInformation($"[NVR2] Processing camera event: Camera={cameraEvent.CameraId}, Type={cameraEvent.EventType}, Time={cameraEvent.Timestamp}");
+        
+        await Task.Delay(1000);
+        
+        switch (cameraEvent.EventType)
+        {
+            case "MotionDetected":
+                _logger.LogInformation($"[NVR2] Starting recording for motion detection from {cameraEvent.CameraId}");
+                break;
+            case "AudioAlert":
+                _logger.LogInformation($"[NVR2] Processing audio alert from {cameraEvent.CameraId}");
+                break;
+            case "ObjectDetection":
+                _logger.LogInformation($"[NVR2] Analyzing object detection from {cameraEvent.CameraId}");
+                break;
+            case "TamperAlert":
+                _logger.LogInformation($"[NVR2] CRITICAL - Tamper alert from {cameraEvent.CameraId}");
+                break;
+            default:
+                _logger.LogWarning($"[NVR2] Unknown event type: {cameraEvent.EventType}");
+                break;
+        }
+        
+        await Task.CompletedTask;
+    }
+}
