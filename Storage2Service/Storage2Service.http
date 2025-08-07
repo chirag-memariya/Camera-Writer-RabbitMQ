@@ -1,0 +1,6 @@
+@Storage2Service_HostAddress = http://localhost:5052
+
+GET {{Storage2Service_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

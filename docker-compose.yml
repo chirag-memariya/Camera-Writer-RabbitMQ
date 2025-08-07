@@ -1,0 +1,94 @@
+services:
+  rabbit:
+    image: rabbitmq:3-management
+    container_name: rabbit
+    hostname: rabbit
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  edgegateway:
+    build: 
+      context: .
+      dockerfile: EdgeGateWay/Dockerfile
+    container_name: edgegateway-service
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    depends_on:
+      rabbit:
+        condition: service_healthy
+    environment:
+        - ASPNETCORE_ENVIRONMENT=Development
+
+
+  nvr1service:
+    build: 
+      context: .
+      dockerfile: NVR1Service/Dockerfile
+    container_name: nvr1-service
+    ports:
+      - "5001:8080"
+    environment: 
+      - RABBITMQ_HOST=rabbit
+      - RABBITMQ_PORT=5672
+    depends_on:
+      rabbit:
+        condition: service_healthy
+
+  nvr2service:
+    build: 
+      context: .
+      dockerfile: NVR2Service/Dockerfile
+    container_name: nvr2-service
+    ports:
+      - "5002:8080"
+    environment: 
+      - RABBITMQ_HOST=rabbit
+      - RABBITMQ_PORT=5672
+    depends_on:
+      rabbit:
+        condition: service_healthy
+
+  storage1service:
+    build:  
+      context: .
+      dockerfile: Storage1Service/Dockerfile
+    container_name: storage1-service
+    ports:
+      - "5003:8080"
+    environment: 
+      - RABBITMQ_HOST=rabbit
+      - RABBITMQ_PORT=5672
+    depends_on:
+      rabbit:
+        condition: service_healthy
+
+  storage2service:
+    build: 
+      context: .
+      dockerfile: Storage2Service/Dockerfile
+    container_name: storage2-service
+    ports:
+      - "5004:8080"
+    environment: 
+      - RABBITMQ_HOST=rabbit
+      - RABBITMQ_PORT=5672
+    depends_on:
+      rabbit:
+        condition: service_healthy
+
+  webclient:
+    build:  
+      context: camera-event-visualizer
+      dockerfile: Dockerfile
+    container_name: web-client
+    ports:
+      - "5172:80"
+    restart: unless-stopped
